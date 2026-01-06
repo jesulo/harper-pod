@@ -14,6 +14,8 @@ import threading
 import re
 
 from stt.asr import load_asr_backend
+from stt.factory import get_stt_model
+from tts.factory import get_tts_model
 from stt.vad import check_audio_state
 from utils.process import process_data_to_audio
 from app.session import Session
@@ -23,15 +25,27 @@ from utils.process import get_volume, pcm16_b64
 from utils.utils import dprint, lprint
 from llm.conversation import conversation_worker, answer_greeting
 
-from tts.chatter_infer import chatter_streamer, cancel_silence_nudge
+# Lazy imports for TTS to avoid loading unused models
+# from tts.chatter_infer import chatter_streamer, cancel_silence_nudge
+from tts.adaptive_streamer import tts_streamer
 from utils.opus import ensure_opus_decoder, decode_opus_float, parse_frame
 from third.smart_turn.inference import predict_endpoint
+from config import settings
+from utils.constants import DEFAULT_VOICE_PATH
 
-INPUT_SAMPLE_RATE = 24000
+INPUT_SAMPLE_RATE = settings.input_sample_rate
 WHISPER_SR = 16000
 
 def jdumps(o):
     return json.dumps(o).decode()
+
+# Helper function for dynamic import of chatterbox-specific functions
+def cancel_silence_nudge_safe(sess):
+    """Safely cancel silence nudge - only imports chatterbox if needed"""
+    if settings.tts_model == "chatterbox":
+        from tts.chatter_infer import cancel_silence_nudge
+        cancel_silence_nudge(sess)
+    # For other TTS models, nudge cancellation is handled in their own streamers
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -39,9 +53,10 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 app = FastAPI()
 
 ASR = None
+TTS = None
 LLM = None
 
-sessions: Dict[int, Session] = {}  # map by id(ws)
+sessions: Dict[int, Session] = {}
 
 
 @app.on_event("startup")
@@ -58,6 +73,33 @@ def init_models():
     except RuntimeError:
         # Already set by another import path
         pass
+
+    # Warmup STT backend if configured
+    global ASR
+    if settings.stt_model and settings.stt_model.lower() not in ["none", "disabled", ""]:
+        print(f"[STARTUP] Initializing STT backend (STT_MODEL={settings.stt_model})...")
+        try:
+            ASR = get_stt_model(settings.stt_model)
+            print(f"[STARTUP] ✅ STT model loaded: {settings.stt_model}")
+        except Exception as e:
+            print(f"[STARTUP] ⚠️ STT initialization failed: {e}")
+            ASR = None
+    else:
+        print(f"[STARTUP] STT warmup skipped (STT_MODEL={settings.stt_model or 'not set'})")
+
+    # Warmup Chatterbox TTS ONLY if configured and enabled
+    global TTS
+    if settings.tts_model and settings.tts_model.lower() not in ["none", "disabled", ""] and settings.tts_model == "chatterbox":
+        print(f"[STARTUP] Warming up Chatterbox local TTS (TTS_MODEL={settings.tts_model})...")
+        try:
+            from tts.chatter_infer import tts_model
+            print(f"[STARTUP] ✅ Chatterbox model loaded: {type(tts_model).__name__}")
+            TTS = "chatterbox_warmed"
+        except Exception as e:
+            print(f"[STARTUP] ⚠️ Chatterbox warmup failed (non-fatal): {e}")
+            TTS = None
+    else:
+        print(f"[STARTUP] TTS warmup skipped (TTS_MODEL={settings.tts_model or 'not set'})")
 
     # If you need to warm up any LLM backends, do it here (lazy by default)
     # global LLM
@@ -78,17 +120,25 @@ async def stt_worker(sess: Session, in_q: asyncio.Queue, out_q: asyncio.Queue):
             pcm_bytes = await in_q.get()  # wait independently of the main loop
             try:
                 sttstart = time.time()
+                print(f"[stt_worker] Processing {len(pcm_bytes)} bytes, queue size: {in_q.qsize()}")
                 text = await transcribe_pcm_generic(
                     audios=pcm_bytes,
                     sample_rate=WHISPER_SR,
                     channels=sess.input_channels,
                     language=sess.language,
                 )
-                await out_q.put({"type": "delta", "text": text})
+                stt_duration = time.time() - sttstart
+                print(f"[stt_worker] Transcription took {stt_duration:.3f}s, result: '{text[:100]}'")
+                if text:
+                    await out_q.put({"type": "delta", "text": text})
+                else:
+                    print(f"[stt_worker] ⚠️ Empty transcription result")
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[stt_worker] error: {e}")
+                print(f"[stt_worker] ❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
             finally:
                 in_q.task_done()
     finally:
@@ -103,7 +153,9 @@ async def stt_worker(sess: Session, in_q: asyncio.Queue, out_q: asyncio.Queue):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    print(f"[WS] New WebSocket connection attempt from {ws.client}")
     await ws.accept()
+    print(f"[WS] WebSocket connection accepted")
     sess = Session(input_sr=INPUT_SAMPLE_RATE, input_channels=1)
     sessions[id(ws)] = sess
 
@@ -112,14 +164,19 @@ async def ws_endpoint(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
+            print(f"[WS] Received message type: {type(msg)}, keys: {msg.keys() if isinstance(msg, dict) else 'N/A'}")
             if msg.get("text") is not None:
+                print(f"[WS] Received text message: {msg['text'][:200]}...")
                 try:
                     data = json.loads(msg["text"])
+                    print(f"[WS] Parsed JSON message type: {data.get('type')}")
                 except json.JSONDecodeError:
+                    print(f"[WS] JSON decode error")
                     await ws.send_text(jdumps({"type": "error", "message": "Invalid JSON"}))
                     continue
 
                 t = data.get("type")
+                print(f"[WS] Processing message type: {t}")
 
                 if t == "ping":
                     await ws.send_text(
@@ -147,7 +204,7 @@ async def ws_endpoint(ws: WebSocket):
 
                 # 1) Session start
                 if t == "scriptsession.start":
-                    global ASR
+                    global ASR, TTS
                     lprint("Start ", data)
 
                     # current time (ms) if provided by client
@@ -155,44 +212,108 @@ async def ws_endpoint(ws: WebSocket):
                         sess.current_time = data.get("time")
 
                     requested_lang = data.get("language", "en").strip()
-                    if ASR is None: # currently only one ASR backend is supported
-                        ASR = load_asr_backend()
+                    
+                    # Use pre-loaded STT from startup (or load now if not done)
+                    if ASR is None and settings.stt_model and settings.stt_model.lower() not in ["none", "disabled", ""]:
+                        try:
+                            print(f"[STT] Loading model on-demand: {settings.stt_model}")
+                            ASR = get_stt_model(settings.stt_model)
+                            print(f"[STT] ✅ Model loaded: {settings.stt_model}")
+                        except Exception as e:
+                            print(f"[STT] ❌ Failed to initialize '{settings.stt_model}': {e}")
+                            ASR = None
+                    
+                    # Use pre-loaded TTS from startup (or load now if not done)
+                    if TTS is None and settings.tts_model and settings.tts_model.lower() not in ["none", "disabled", ""]:
+                        if settings.tts_model == "chatterbox":
+                            print("[TTS] Using pre-loaded Chatterbox model")
+                            TTS = "chatterbox_warmed"
+                        else:
+                            try:
+                                print(f"[TTS] Loading model on-demand: {settings.tts_model}")
+                                TTS = get_tts_model(settings.tts_model)
+                                sess.tts_model = TTS
+                                print(f"[TTS] ✅ Model loaded: {settings.tts_model}")
+                            except Exception as e:
+                                print(f"[TTS] ❌ Failed to initialize '{settings.tts_model}': {e}")
+                                TTS = None
+                    
+                    if ASR:
+                        print(f"[Session] Using STT: {type(ASR).__name__ if hasattr(ASR, '__name__') else type(ASR).__class__.__name__}")
+                    if TTS:
+                        print(f"[Session] Using TTS: {TTS if isinstance(TTS, str) else type(TTS).__name__}")
+                            
                     sess.language = requested_lang
 
                     sess.name = data.get("name", "hojin")
 
-                    if sess.stt_task is None:
-                        sess.stt_task = asyncio.create_task(stt_worker(sess, sess.stt_in_q, sess.stt_out_q))
+                    # Start STT workers ONLY if STT is enabled
+                    if ASR is not None:
+                        if sess.stt_task is None:
+                            print(f"[Session] Starting STT worker (ASR={type(ASR).__name__})")
+                            sess.stt_task = asyncio.create_task(stt_worker(sess, sess.stt_in_q, sess.stt_out_q))
 
-                    if sess.stt_out_consumer_task is None:
-                        sess.stt_out_consumer_task = asyncio.create_task(stt_out_consumer(sess))
+                        if sess.stt_out_consumer_task is None:
+                            print("[Session] Starting STT output consumer")
+                            sess.stt_out_consumer_task = asyncio.create_task(stt_out_consumer(sess))
+                        
+                        print("[Session] ✅ STT workers initialized")
+                    else:
+                        print("[Session] ⚠️ STT workers skipped - STT not initialized")
 
-                    if sess.tts_task is None:
+                    # Start TTS workers ONLY if TTS is enabled
+                    if TTS is not None and sess.tts_task is None:
                         try:
-                            sess.tts_task = asyncio.create_task(chatter_streamer(sess))
+                            # Use chatter_streamer for chatterbox model, tts_streamer for others
+                            if settings.tts_model == "chatterbox":
+                                from tts.chatter_infer import chatter_streamer
+                                sess.tts_task = asyncio.create_task(chatter_streamer(sess))
+                            else:
+                                sess.tts_task = asyncio.create_task(tts_streamer(sess))
                             sess.conversation_task = asyncio.create_task(conversation_worker(sess))
                             sess.is_use_filler = data.get("use_filler", False)
 
                             await ws.send_text(jdumps({"type": "scriptsession.started"}))
+                            
+                            # Small delay to ensure tts_task is waiting on queue
+                            await asyncio.sleep(0.1)
+                            print("[Session] TTS and conversation workers started, sending greeting...")
                         except Exception as e:
                             dprint("TTS connection error ", e)
+                    elif TTS is None:
+                        print("[Session] TTS workers skipped - TTS not initialized")
+                        # Still send started event even without TTS
+                        await ws.send_text(jdumps({"type": "scriptsession.started"}))
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
 
-                    await answer_greeting(sess)
+                    # Send greeting ONLY if TTS is available
+                    if TTS is not None:
+                        await answer_greeting(sess)
+                        print("[Session] Greeting sent to TTS queue")
+                    else:
+                        print("[Session] Greeting skipped - TTS not available")
 
                 elif t == "input_audio_buffer.append":
+                    print(f"[AUDIO] Received audio buffer message")
                     try:
                         aud = data.get("audio")
+                        print(f"[AUDIO] Audio data length: {len(aud) if aud else 0}")
                         if aud:
                             audio = process_data_to_audio(
                                 aud, input_sample_rate=INPUT_SAMPLE_RATE, whisper_sr=WHISPER_SR
                             )
+                            print(f"[AUDIO] Processed audio shape: {audio.shape if audio is not None else 'None'}")
                             if audio is None:
                                 dprint("[NO AUDIO]")
                                 continue
 
                             vad_event = check_audio_state(audio)
+                            
+                            # Debug: mostrar nivel de audio y estado VAD
+                            audio_level = get_volume(audio.astype(np.float32, copy=False))[1]
+                            if vad_event or audio_level > 0.01:
+                                print(f"[VAD] event={vad_event}, audio_level={audio_level:.4f}, state={sess.current_audio_state}")
 
                             if sess.current_audio_state != "start":
                                 sess.pre_roll.append(audio)
@@ -204,7 +325,7 @@ async def ws_endpoint(ws: WebSocket):
                                         continue
 
                                     sess.current_audio_state = "start"
-                                    cancel_silence_nudge(sess)
+                                    cancel_silence_nudge_safe(sess)
                                     await interrupt_output(sess, reason="start speaking")
                                     if len(sess.pre_roll) > 0:
                                         sess.audios = (np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False))
@@ -242,6 +363,13 @@ async def ws_endpoint(ws: WebSocket):
                                     )
                                     continue
                                 
+                                # Esperar a que se procesen todos los chunks pendientes en la cola STT
+                                pending_items = sess.stt_in_q.qsize()
+                                if pending_items > 0:
+                                    print(f"[Voice End] Waiting for {pending_items} pending STT chunks to process...")
+                                    await sess.stt_in_q.join()  # Wait for all items to be processed
+                                    print(f"[Voice End] All STT chunks processed")
+                                
                                 sess.current_audio_state = "none"
                                 await sess.out_q.put(
                                     jdumps({"type": "transcript", "text": sess.transcript.strip(), "is_final": True})
@@ -260,10 +388,13 @@ async def ws_endpoint(ws: WebSocket):
                                     np.clip(sess.audios, -1.0, 1.0) * 32767.0
                                 ).astype(np.int16).tobytes()
 
+                                print(f"[STT] Sending audio to queue: {len(pcm_bytes)} bytes")
                                 # Non-blocking queue push (drop oldest on overflow)
                                 try:
                                     sess.stt_in_q.put_nowait(pcm_bytes)
+                                    print(f"[STT] Audio queued successfully")
                                 except asyncio.QueueFull:
+                                    print("[STT] Queue full, dropping oldest")
                                     try:
                                         _ = sess.stt_in_q.get_nowait()
                                         sess.stt_in_q.task_done()
@@ -345,7 +476,7 @@ async def ws_endpoint(ws: WebSocket):
                             continue
 
                         sess.current_audio_state = "start"
-                        cancel_silence_nudge(sess)
+                        cancel_silence_nudge_safe(sess)
                         await interrupt_output(sess, reason="start speaking")
 
                         if len(sess.pre_roll) > 0:
@@ -432,23 +563,27 @@ async def _transcribe_tts_buffer(sess: Session) -> str:
 
 
 async def interrupt_output(sess: Session, reason: str = "start speaking"):
-    print("[interrupt_output] ", reason)
+    print(f"[interrupt_output] 🛑 Interrupting playback - reason: {reason}")
     st = time.time()
 
     now = time.time()
     if now - getattr(sess, "last_interrupt_ts", 0) < 1.0:
-        print("If under 1s")
+        print("[interrupt_output] ⚠️ Skipping - already interrupted within 1s")
         return
     sess.last_interrupt_ts = now
 
     try:
         sess.out_q.put_nowait(jdumps({"type": "tts_stop", "reason": reason}))
-    except Exception:
+        print(f"[interrupt_output] ✅ Sent tts_stop message to frontend")
+    except Exception as e:
+        print(f"[interrupt_output] ❌ Failed to send tts_stop: {e}")
         pass
 
     try:
         sess.tts_stop_event.set()
-    except Exception:
+        print(f"[interrupt_output] ✅ Set tts_stop_event")
+    except Exception as e:
+        print(f"[interrupt_output] ❌ Failed to set tts_stop_event: {e}")
         pass
 
     for task_name in ("tts_task", "conversation_task", "silence_nudge_task"):
@@ -481,7 +616,7 @@ async def interrupt_output(sess: Session, reason: str = "start speaking"):
 
     if sess.running:
         if sess.tts_task is None:
-            sess.tts_task = asyncio.create_task(chatter_streamer(sess))
+            sess.tts_task = asyncio.create_task(tts_streamer(sess))
         if sess.conversation_task is None:
             sess.conversation_task = asyncio.create_task(conversation_worker(sess))
 
@@ -521,3 +656,8 @@ async def delayed_force_turn_end(sess: Session, delay: float = 1.0, script: str 
         sess.end_scripting_time = time.time() % 1000
     finally:
         sess.pending_turn_task = None
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)

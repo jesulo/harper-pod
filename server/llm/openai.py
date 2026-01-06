@@ -320,3 +320,12 @@ Return only the JSON object, nothing else.
         "prompt_tokens_cached": pt_cached,
         "completion_tokens": ct
     }
+
+def translate(text: str, target_language: str = "English", onToken: Callable[[str], None] = None) -> str:
+    """Basic translate function for compatibility"""
+    # For now, just return the original text as Harper may not need translation
+    # This can be expanded later with actual translation logic
+    if onToken:
+        for char in text:
+            onToken(char)
+    return text

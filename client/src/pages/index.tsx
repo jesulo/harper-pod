@@ -25,7 +25,7 @@ export default function Jennifer() {
   const [languageCode, setLanguageCode] = useState<LANGUAGE_CODE>(
     LANGUAGE_CODE.English
   );
-  const [socketUrl, setSocketUrl] = useState("");
+  const [socketUrl, setSocketUrl] = useState("ws://192.168.100.198:5000/ws");
   const [isSessionLoading, setIsSessionLoading] = useState(false);
   const opusPlayerRef = useRef<OpusWebCodecsPlayer | null>(null);
 
@@ -45,6 +45,7 @@ export default function Jennifer() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const playerRef = useRef<StreamingAudioPlayer | null>(null);
+  const isAudioStoppedRef = useRef(false);
 
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -110,10 +111,12 @@ export default function Jennifer() {
 
   const openSocket = useCallback(async () => {
     const url = socketUrl;
+    console.log(`[FRONTEND] Attempting to connect to: ${url}`);
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      console.log(`[FRONTEND] WebSocket connected successfully`);
       ws.binaryType = "arraybuffer";
 
       const now = new Date();
@@ -134,8 +137,17 @@ export default function Jennifer() {
         time: formatted,
         name: userName,
       };
+      console.log(`[FRONTEND] Sending start message:`, openMsg);
       ws.send(JSON.stringify(openMsg));
       setIsSessionLoading(true);
+    };
+
+    ws.onerror = (err) => {
+      console.error(`[FRONTEND] WebSocket error:`, err);
+    };
+
+    ws.onclose = (event) => {
+      console.log(`[FRONTEND] WebSocket closed:`, event.code, event.reason);
     };
 
     ws.onmessage = async (ev) => {
@@ -145,6 +157,13 @@ export default function Jennifer() {
           console.warn("[OpusDecoder] skip empty chunk");
           return;
         }
+        
+        // If audio was stopped (user interrupted), ignore incoming frames
+        if (isAudioStoppedRef.current) {
+          console.log("[OpusDecoder] ⚠️ Ignoring frame - audio was stopped");
+          return;
+        }
+        
         const buf: ArrayBuffer = ev.data;
         const view = new DataView(buf);
         // MAGIC check: 0xA1 0x51
@@ -154,27 +173,32 @@ export default function Jennifer() {
           const seq = view.getUint32(4, true);
           const pktLen = view.getUint32(16, true);
           const payload = new Uint8Array(buf, 20, pktLen);
-          // console.log("ev.data get", payload.length);
+          
+          // console.log(`[OpusDecoder] 📦 Binary frame received - seq: ${seq}, pktLen: ${pktLen}, payload.length: ${payload.length}, isFinal: ${isFinal}, bufferSize: ${buf.byteLength}`);
 
           lastTtsAtRef.current = performance.now();
 
           if (!opusPlayerRef.current) {
-            console.log("new OpusWebCodecsPlayer");
+            // console.log("[OpusDecoder] 🎵 Creating new OpusWebCodecsPlayer");
             opusPlayerRef.current = new OpusWebCodecsPlayer();
             opusPlayerRef.current.configure();
           }
 
           if (!payload || payload.length === 0) {
-            console.log("[OpusDecoder] skip empty payload isFinal ", isFinal);
+            // console.log(`[OpusDecoder] ⚠️ Empty payload - isFinal: ${isFinal}, only flushing (keeping player alive for next audio)`);
             opusPlayerRef.current.flush().catch(() => {});
-            opusPlayerRef.current = null;
+            // Don't destroy the player - keep it for the next audio stream (e.g., nudge)
+            // opusPlayerRef.current = null;
+            isAudioStoppedRef.current = false; // Reset flag
             return;
           }
+          // console.log(`[OpusDecoder] ✅ Decoding frame ${seq} with ${payload.length} bytes`);
           opusPlayerRef.current.decodeFrame(payload, seq);
 
           if (isFinal) {
-            console.log("[OpusDecoder] flush 호출 됩니까?");
+            // console.log(`[OpusDecoder] 🏁 Final frame received (seq: ${seq}), flushing player`);
             opusPlayerRef.current.flush().catch(() => {});
+            isAudioStoppedRef.current = false; // Reset flag when done
           }
           return;
         }
@@ -199,8 +223,18 @@ export default function Jennifer() {
 
       console.log("msgType", msgType, !opusPlayerRef.current);
       if (msgType === "tts_audio_meta" && msg.format === "opus") {
-        if (!opusPlayerRef.current)
-          opusPlayerRef.current = new OpusWebCodecsPlayer();
+        console.log("[FRONTEND] 🎵 tts_audio_meta received - creating fresh player");
+        // New audio stream starting - reset the stop flag
+        isAudioStoppedRef.current = false;
+        // Always close and recreate the player for a clean state
+        if (opusPlayerRef.current) {
+          try {
+            opusPlayerRef.current.close();
+          } catch (e) {
+            console.warn("[FRONTEND] Error closing old player:", e);
+          }
+        }
+        opusPlayerRef.current = new OpusWebCodecsPlayer();
         opusPlayerRef.current.configure();
         return;
       }
@@ -221,6 +255,10 @@ export default function Jennifer() {
         const clean = String(msg.text ?? "").trim();
         if (!clean) return;
 
+        // Reset audio stop flag when new speaking message arrives (for proactive messages)
+        console.log("[FRONTEND] 📢 Received speaking message, ensuring audio is ready");
+        isAudioStoppedRef.current = false;
+
         setResponses((ts) => [
           ...ts,
           {
@@ -228,6 +266,14 @@ export default function Jennifer() {
             text: clean,
           },
         ]);
+      } else if (msgType === "tts_stop") {
+        // Backend requested to stop audio playback (user interrupted)
+        console.log("[FRONTEND] 🛑 Received tts_stop, clearing audio playback");
+        isAudioStoppedRef.current = true; // Set flag to ignore incoming frames
+        if (opusPlayerRef.current) {
+          opusPlayerRef.current.close();
+          opusPlayerRef.current = null;
+        }
       } else if (msgType === "session.close") {
         setConnected(false);
       } else if (msgType === "interrupt_output") {
@@ -271,7 +317,9 @@ export default function Jennifer() {
   }, [sendAudioCommit]);
 
   const startMic = useCallback(async () => {
+    console.log(`[FRONTEND] Starting microphone...`);
     const ws = wsRef.current;
+    console.log(`[FRONTEND] WebSocket state when starting mic: ${ws?.readyState || 'null'}`);
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -283,6 +331,7 @@ export default function Jennifer() {
       },
       video: false,
     });
+    console.log(`[FRONTEND] Microphone stream obtained`);
     const audioCtx = new (window.AudioContext ||
       (window as any).webkitAudioContext)({
       sampleRate: 48000,
@@ -326,6 +375,7 @@ export default function Jennifer() {
       const audioB64 = int16ToBase64(pcm16);
 
       if (ws?.readyState === WebSocket.OPEN) {
+        // console.log(`[FRONTEND] Sending audio buffer, length: ${audioB64.length}, readyState: ${ws.readyState}`);
         ws.send(
           JSON.stringify({
             type: "input_audio_buffer.append",
@@ -333,6 +383,9 @@ export default function Jennifer() {
             t0: Date.now(),
           })
         );
+        // console.log(`[FRONTEND] Audio buffer sent successfully`);
+      } else {
+        // console.log(`[FRONTEND] WebSocket not ready, readyState: ${ws?.readyState || 'null'}`);
       }
 
       // voice-end detection for latency metric
@@ -383,7 +436,7 @@ export default function Jennifer() {
   }, [recording, stopMic]);
 
   const onStart = useCallback(async () => {
-    // if (!connected) await startSession();
+    if (!connected) await startSession();
     setConnected(true);
     setIsSessionLoading(false);
     setIsSpeaking(true);
@@ -441,7 +494,7 @@ export default function Jennifer() {
     <div className="min-h-screen w-full bg-[#F9FAF7] text-[#2D2F26]">
       <header className="flex items-start justify-between px-4 py-4">
         <div className="flex items-center gap-2">
-          <Image src="/images/logo.png" alt="jennifer" width={32} height={32} />
+          <Image src="/images/logo.ico" alt="harper" width={32} height={32} />
         </div>
         <div className="text-center">
           <div className="px-6 pt-8 pb-4 flex flex-col items-center select-none">

@@ -42,10 +42,14 @@ This will regenerate the pre-generated audio clips using the new voice.
 ## Modules Used
 thanks to the following projects 🔥
 
-- **STT**: [whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)  
+- **STT**: [whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) or [Groq Whisper API](https://groq.com)
 - **LLM**: <code>gpt-4.1-mini</code> (API) or <code>gpt-oss-20b</code> (via [Ollama](https://ollama.ai))  
-- **TTS**: [chatterbox](https://github.com/resemble-ai/chatterbox)
+- **TTS**: [chatterbox](https://github.com/resemble-ai/chatterbox) or [Together AI](https://together.ai)
 - **Turn Detection**: [silero-vad](https://github.com/snakers4/silero-vad) + [pipecat/smart-turn-v3](https://github.com/pipecat-ai/smart-turn)
+
+**Available Backends:**
+- **STT Options**: `whisper-local` (default), `groq`
+- **TTS Options**: `chatterbox` (local, default), `together`
 
 <br />
 
@@ -90,6 +94,28 @@ npm run dev
 
 **Run the server**
 
+**Configuration Manager (New!)**
+
+You can now easily switch between different STT and TTS backends by editing `.env`:
+
+```bash
+# Create configuration file
+cp .env.example .env
+
+# Edit .env to configure backends:
+STT_MODEL=groq          # Options: whisper-local, groq  
+TTS_MODEL=together      # Options: chatterbox, together
+
+# Add your API keys:
+STT__GROQ_API_KEY=your_groq_key
+TTS__TOGETHER_API_KEY=your_together_key
+
+# Run Harper
+python companionserver.py
+```
+
+**Manual Configuration**
+
 **1. For Local LLM**
 
 1. In <code>server/utils/constants.py</code>, set  
@@ -111,8 +137,8 @@ Set your API key in <code>server/utils/constants.py</code>
    ```export OPENAI_KEY="sk-xxxxxx"```
 
 ```bash
-
-uvicorn companionserver:app --host 0.0.0.0 --port 5000  
+python companionserver.py
+# OR: uvicorn companionserver:app --host 0.0.0.0 --port 5000
 ```
 
 <br />

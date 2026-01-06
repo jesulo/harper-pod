@@ -1,6 +1,8 @@
+import os
+
 COMPANION_NAME = "Harper"
 LLM_MODEL = "api" # "api" or "local"
-OPENAI_KEY = ""
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 
 DEFAULT_VOICE_PATH = "./audio_samples/output_full.wav"
 DEFAULT_KOREAN_VOICE_PATH = "./audio_samples/shogun.wav"

@@ -53,6 +53,9 @@ class Session:
         self.silence_nudge_task: Optional[asyncio.Task] = None
         self.stt_out_consumer_task: Optional[asyncio.Task] = None
         self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        
+        # TTS model instance for factory pattern
+        self.tts_model = None
 
         # ---- 전역/세션 초기화 시 ----
         self.stt_in_q: asyncio.Queue[bytes]  = asyncio.Queue(maxsize=2)

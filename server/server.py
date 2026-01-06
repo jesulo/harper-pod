@@ -357,19 +357,59 @@ async def run_translate_async(sess: Session) -> str:
             return
         
         chunk = "".join(sess.tts_buf).strip()
-        chunk = re.sub(r"<[^>]*>", "", chunk)
+        
+        # Procesar marcas de silencio antes de eliminar otras etiquetas
+        # Convertir <silence N> en tuplas (__silence__, N) para el TTS
+        silence_pattern = r'<silence\s+(\d+(?:\.\d+)?)>'
+        parts = []
+        last_end = 0
+        
+        for match in re.finditer(silence_pattern, chunk):
+            # Agregar texto antes del silencio
+            text_before = chunk[last_end:match.start()].strip()
+            if text_before:
+                # Eliminar otras etiquetas HTML del texto
+                text_before = re.sub(r"<[^>]*>", "", text_before)
+                if text_before:
+                    parts.append(text_before)
+            
+            # Agregar la marca de silencio como tupla
+            silence_duration = float(match.group(1))
+            parts.append(("__silence__", silence_duration))
+            dprint(f"[flush_tts_chunk] Detected silence: {silence_duration}s")
+            
+            last_end = match.end()
+        
+        # Agregar texto después del último silencio
+        text_after = chunk[last_end:].strip()
+        if text_after:
+            text_after = re.sub(r"<[^>]*>", "", text_after)
+            if text_after:
+                parts.append(text_after)
+        
+        # Si no hay silencios, procesar como antes
+        if not parts:
+            chunk = re.sub(r"<[^>]*>", "", chunk)
+            if chunk.strip():
+                parts.append(chunk)
 
-        dprint("[flush_tts_chunk] ", repr(chunk))
+        dprint("[flush_tts_chunk] Parts:", parts)
         sess.tts_buf.clear()
+        
         try:
-            # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
-            chunks = chunk.split(" ")
-            for i in range(0, len(chunks), 3):
-                if i >= len(chunks) - 4:
-                    sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
-                    break
+            for part in parts:
+                if isinstance(part, tuple):
+                    # Enviar tupla de silencio directamente
+                    sess.tts_in_q.put_nowait(part)
                 else:
-                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3]) + " ") # 기본적으로는 단어를 3개씩 끊어서 보내기
+                    # Procesar texto normal (dividir en palabras de 3 en 3)
+                    chunks = part.split(" ")
+                    for i in range(0, len(chunks), 3):
+                        if i >= len(chunks) - 4:
+                            sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
+                            break
+                        else:
+                            sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3]) + " ") # 기본적으로는 단어를 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
@@ -487,6 +527,19 @@ async def elevenlabs_streamer(
                 try:
                     while sess.running:
                         text_chunk = await sess.tts_in_q.get()
+                        
+                        # Procesar tuplas de silencio
+                        if isinstance(text_chunk, tuple) and len(text_chunk) == 2 and text_chunk[0] == "__silence__":
+                            silence_duration = float(text_chunk[1])
+                            dprint(f"[elevenlabs_streamer] Processing silence: {silence_duration}s")
+                            # Enviar silencio al cliente directamente
+                            await sess.out_q.put(jdumps({
+                                "type": "silence",
+                                "duration": silence_duration
+                            }))
+                            continue
+                        
+                        # Procesar texto normal
                         if not (text_chunk and text_chunk.strip()):
                             continue
                     

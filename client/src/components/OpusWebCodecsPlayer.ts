@@ -13,6 +13,7 @@ export class OpusWebCodecsPlayer {
   private reorderWindow = new Map<number, Uint8Array>();
   private expecting = 0;
   private readonly REORDER_MAX = 8;
+  private activeSources: Set<AudioBufferSourceNode> = new Set();
 
   constructor(audioCtx?: AudioContext) {
     this.audioCtx =
@@ -22,6 +23,7 @@ export class OpusWebCodecsPlayer {
   }
 
   configure() {
+    console.log("[OpusWebCodecsPlayer] 🔧 Configuring decoder...");
     try {
       this.decoder?.close();
     } catch {}
@@ -37,15 +39,20 @@ export class OpusWebCodecsPlayer {
       description: opusHeader.buffer,
     });
     if (this.audioCtx.state === "suspended") {
+      console.log("[OpusWebCodecsPlayer] ⏸️ AudioContext suspended, resuming...");
       this.audioCtx.resume().catch(() => {});
     }
+    console.log(`[OpusWebCodecsPlayer] ✅ Configured - AudioContext state: ${this.audioCtx.state}, currentTime: ${this.audioCtx.currentTime.toFixed(3)}`);
     this.primed = false;
     this.playHead = Math.max(this.audioCtx.currentTime + this.PREBUFFER_SEC, 0);
     this.lastSeq = -1;
+    this.expecting = -1; // Accept any first frame
     this.reorderWindow.clear();
+    // console.log("[OpusWebCodecsPlayer] 🔄 Reset sequencing - expecting: -1, reorderWindow cleared");
   }
 
   private onDecoded(audioData: AudioData) {
+    // console.log(`[OpusWebCodecsPlayer] 🎵 onDecoded called - frames: ${audioData.numberOfFrames}, channels: ${audioData.numberOfChannels}, sampleRate: ${audioData.sampleRate}`);
     const ab = this.audioCtx.createBuffer(
       audioData.numberOfChannels,
       audioData.numberOfFrames,
@@ -63,6 +70,7 @@ export class OpusWebCodecsPlayer {
         this.playHead
       );
       this.primed = true;
+      // console.log(`[OpusWebCodecsPlayer] ✨ Primed - playHead: ${this.playHead.toFixed(3)}s`);
     }
     const src = this.audioCtx.createBufferSource();
     src.buffer = ab;
@@ -71,15 +79,32 @@ export class OpusWebCodecsPlayer {
       this.playHead,
       this.audioCtx.currentTime + this.SAFETY_BUFFER_SEC
     );
+    
+    // Track active sources
+    this.activeSources.add(src);
+    
+    // console.log(`[OpusWebCodecsPlayer] 🔊 Starting playback - when: ${when.toFixed(3)}s, duration: ${ab.duration.toFixed(3)}s, currentTime: ${this.audioCtx.currentTime.toFixed(3)}s`);
     src.start(when);
     this.playHead = when + ab.duration;
-    src.onended = () => src.disconnect();
+    src.onended = () => {
+      src.disconnect();
+      this.activeSources.delete(src);
+    };
   }
 
   decodeFrame(payload: Uint8Array, seq: number, timestampUSec?: number) {
     if (!this.decoder) return;
 
-    if (seq < this.expecting) return;
+    // First frame after configure? Accept it and start sequencing
+    if (this.expecting === -1) {
+      console.log(`[OpusWebCodecsPlayer] 🎯 First frame - seq: ${seq}, starting sequencing from here`);
+      this.expecting = seq;
+    }
+
+    if (seq < this.expecting) {
+      // console.log(`[OpusWebCodecsPlayer] ⏮️ Skipping old frame - seq: ${seq}, expecting: ${this.expecting}`);
+      return;
+    }
 
     if (seq === this.expecting) {
       this.doDecode(payload, seq, timestampUSec);
@@ -88,6 +113,8 @@ export class OpusWebCodecsPlayer {
       return;
     }
 
+    // Future frame - add to reorder window
+    // console.log(`[OpusWebCodecsPlayer] 🔮 Future frame - seq: ${seq}, expecting: ${this.expecting}, adding to reorder window`);
     this.reorderWindow.set(seq, payload);
 
     if (this.reorderWindow.size > this.REORDER_MAX) {
@@ -108,6 +135,11 @@ export class OpusWebCodecsPlayer {
   }
 
   private doDecode(payload: Uint8Array, seq: number, timestampUSec?: number) {
+    if (!this.decoder || this.decoder.state !== "configured") {
+      console.warn(`[OpusWebCodecsPlayer] ⚠️ Decoder not ready - state: ${this.decoder?.state}, seq: ${seq}`);
+      return;
+    }
+    // console.log(`[OpusWebCodecsPlayer] 📥 Decoding seq ${seq}, payload size: ${payload.length}`);
     const ts = Math.trunc(timestampUSec ?? seq * this.FRAME_SEC * 1_000_000);
     const chunk = new (window as any).EncodedAudioChunk({
       type: "key",
@@ -128,12 +160,28 @@ export class OpusWebCodecsPlayer {
   }
 
   close() {
+    console.log("[OpusWebCodecsPlayer] 🛑 Stopping playback - active sources:", this.activeSources.size);
+    
+    // Stop all active audio sources immediately
+    this.activeSources.forEach(src => {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch (e) {
+        // Source might have already ended
+      }
+    });
+    this.activeSources.clear();
+    
+    // Close the decoder
     try {
       this.decoder?.close();
     } catch {}
     this.decoder = null;
     this.primed = false;
     this.reorderWindow.clear();
+    
+    console.log("[OpusWebCodecsPlayer] ✅ All audio stopped");
   }
 
   get context() {
