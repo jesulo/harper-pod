@@ -50,6 +50,9 @@ class HarperSettings(BaseSettings):
     stt_model: str = Field(default="whisper-local", description="STT model (whisper-local, groq)")
     tts_model: str = Field(default="chatterbox", description="TTS model (chatterbox, resemble, together)")
     
+    # OpenAI API Key (for LLM)
+    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
+    
     # Component settings
     stt: STTSettings = Field(default_factory=STTSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
@@ -67,6 +70,7 @@ class HarperSettings(BaseSettings):
         case_sensitive = False
         # Allow missing .env file - use defaults
         env_ignore_empty = True
+        extra = "allow"
 
 
 # Global settings instance

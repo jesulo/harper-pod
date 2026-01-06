@@ -77,29 +77,44 @@ def init_models():
     # Warmup STT backend if configured
     global ASR
     if settings.stt_model and settings.stt_model.lower() not in ["none", "disabled", ""]:
-        print(f"[STARTUP] Initializing STT backend (STT_MODEL={settings.stt_model})...")
-        try:
+        # Remote STT services (groq, openai) don't need local model loading
+        if settings.stt_model.lower() in ["groq", "openai"]:
+            print(f"[STARTUP] STT configurado para usar servicio remoto: {settings.stt_model.upper()}")
+            print(f"[STARTUP] ✅ No se carga modelo local STT (usando API {settings.stt_model})")
             ASR = get_stt_model(settings.stt_model)
-            print(f"[STARTUP] ✅ STT model loaded: {settings.stt_model}")
-        except Exception as e:
-            print(f"[STARTUP] ⚠️ STT initialization failed: {e}")
-            ASR = None
+        else:
+            print(f"[STARTUP] Inicializando modelo STT local (STT_MODEL={settings.stt_model})...")
+            try:
+                ASR = get_stt_model(settings.stt_model)
+                print(f"[STARTUP] ✅ Modelo STT local cargado: {settings.stt_model}")
+            except Exception as e:
+                print(f"[STARTUP] ⚠️ Error al cargar modelo STT: {e}")
+                ASR = None
     else:
-        print(f"[STARTUP] STT warmup skipped (STT_MODEL={settings.stt_model or 'not set'})")
+        print(f"[STARTUP] STT deshabilitado (STT_MODEL={settings.stt_model or 'not set'})")
 
     # Warmup Chatterbox TTS ONLY if configured and enabled
     global TTS
-    if settings.tts_model and settings.tts_model.lower() not in ["none", "disabled", ""] and settings.tts_model == "chatterbox":
-        print(f"[STARTUP] Warming up Chatterbox local TTS (TTS_MODEL={settings.tts_model})...")
-        try:
-            from tts.chatter_infer import tts_model
-            print(f"[STARTUP] ✅ Chatterbox model loaded: {type(tts_model).__name__}")
-            TTS = "chatterbox_warmed"
-        except Exception as e:
-            print(f"[STARTUP] ⚠️ Chatterbox warmup failed (non-fatal): {e}")
+    if settings.tts_model and settings.tts_model.lower() not in ["none", "disabled", ""]:
+        # Remote TTS services (resemble, openai) don't need local model loading
+        if settings.tts_model.lower() in ["resemble", "openai"]:
+            print(f"[STARTUP] TTS configurado para usar servicio remoto: {settings.tts_model.upper()}")
+            print(f"[STARTUP] ✅ No se carga modelo local TTS (usando API {settings.tts_model})")
+            TTS = None  # Remote services don't need pre-loaded model
+        elif settings.tts_model == "chatterbox":
+            print(f"[STARTUP] Cargando modelo TTS local Chatterbox...")
+            try:
+                from tts.chatter_infer import tts_model
+                print(f"[STARTUP] ✅ Modelo Chatterbox local cargado: {type(tts_model).__name__}")
+                TTS = "chatterbox_warmed"
+            except Exception as e:
+                print(f"[STARTUP] ⚠️ Error al cargar Chatterbox: {e}")
+                TTS = None
+        else:
+            print(f"[STARTUP] Cargando TTS: {settings.tts_model}")
             TTS = None
     else:
-        print(f"[STARTUP] TTS warmup skipped (TTS_MODEL={settings.tts_model or 'not set'})")
+        print(f"[STARTUP] TTS deshabilitado (TTS_MODEL={settings.tts_model or 'not set'})")
 
     # If you need to warm up any LLM backends, do it here (lazy by default)
     # global LLM
@@ -164,19 +179,19 @@ async def ws_endpoint(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
-            print(f"[WS] Received message type: {type(msg)}, keys: {msg.keys() if isinstance(msg, dict) else 'N/A'}")
+            # print(f"[WS] Received message type: {type(msg)}, keys: {msg.keys() if isinstance(msg, dict) else 'N/A'}")
             if msg.get("text") is not None:
-                print(f"[WS] Received text message: {msg['text'][:200]}...")
+                # print(f"[WS] Received text message: {msg['text'][:200]}...")
                 try:
                     data = json.loads(msg["text"])
-                    print(f"[WS] Parsed JSON message type: {data.get('type')}")
+                    # print(f"[WS] Parsed JSON message type: {data.get('type')}")
                 except json.JSONDecodeError:
                     print(f"[WS] JSON decode error")
                     await ws.send_text(jdumps({"type": "error", "message": "Invalid JSON"}))
                     continue
 
                 t = data.get("type")
-                print(f"[WS] Processing message type: {t}")
+                # print(f"[WS] Processing message type: {t}")
 
                 if t == "ping":
                     await ws.send_text(
@@ -213,6 +228,82 @@ async def ws_endpoint(ws: WebSocket):
 
                     requested_lang = data.get("language", "en").strip()
                     
+                    # ========== HEALTHCHECK: Verify external APIs BEFORE starting session ==========
+                    print("[Healthcheck] 🏥 Verificando APIs externas antes de iniciar sesión...")
+                    healthcheck_failed = False
+                    error_messages = []
+                    
+                    # Check STT service (Groq, OpenAI, etc.)
+                    if settings.stt_model and settings.stt_model.lower() in ["groq", "openai"]:
+                        try:
+                            print(f"[Healthcheck] Verificando STT ({settings.stt_model.upper()})...")
+                            if settings.stt_model == "groq":
+                                from groq import Groq
+                                groq_client = Groq(api_key=settings.stt.groq_api_key)
+                                # Simple API check - list models
+                                models = groq_client.models.list()
+                                print(f"[Healthcheck] ✅ Groq API OK")
+                            elif settings.stt_model == "openai":
+                                from openai import OpenAI
+                                openai_client = OpenAI(api_key=settings.openai_api_key)
+                                # Simple API check
+                                models = openai_client.models.list()
+                                print(f"[Healthcheck] ✅ OpenAI STT API OK")
+                        except Exception as e:
+                            error_msg = f"STT ({settings.stt_model}) API no disponible: {str(e)[:100]}"
+                            print(f"[Healthcheck] ❌ {error_msg}")
+                            error_messages.append(error_msg)
+                            healthcheck_failed = True
+                    
+                    # Check TTS service (Resemble, OpenAI, etc.)
+                    if settings.tts_model and settings.tts_model.lower() in ["resemble", "openai"]:
+                        try:
+                            print(f"[Healthcheck] Verificando TTS ({settings.tts_model.upper()})...")
+                            if settings.tts_model == "resemble":
+                                import httpx
+                                # Verify Resemble API key with a simple request
+                                async with httpx.AsyncClient(timeout=5.0) as client:
+                                    # Test endpoint to verify credentials
+                                    headers = {
+                                        "Authorization": f"Bearer {settings.tts.resemble_api_key}",
+                                        "Content-Type": "application/json"
+                                    }
+                                    # Simple health check - try to access voices endpoint
+                                    response = await client.get(
+                                        "https://app.resemble.ai/api/v2/voices",
+                                        headers=headers
+                                    )
+                                    if response.status_code == 401:
+                                        raise Exception("API key inválida o expirada (401)")
+                                    elif response.status_code >= 400:
+                                        raise Exception(f"HTTP {response.status_code}")
+                                    print(f"[Healthcheck] ✅ Resemble API OK")
+                            elif settings.tts_model == "openai":
+                                from openai import OpenAI
+                                openai_client = OpenAI(api_key=settings.openai_api_key)
+                                models = openai_client.models.list()
+                                print(f"[Healthcheck] ✅ OpenAI TTS API OK")
+                        except Exception as e:
+                            error_msg = f"TTS ({settings.tts_model}) API no disponible: {str(e)[:100]}"
+                            print(f"[Healthcheck] ❌ {error_msg}")
+                            error_messages.append(error_msg)
+                            healthcheck_failed = True
+                    
+                    # If healthcheck failed, abort session start
+                    if healthcheck_failed:
+                        full_error = "\\n".join(error_messages)
+                        print(f"[Healthcheck] ⛔ Healthcheck fallido. No se puede iniciar la sesión.")
+                        await ws.send_text(jdumps({
+                            "type": "error",
+                            "message": f"No se puede iniciar la sesión. Servicios no disponibles:\\n{full_error}",
+                            "error_type": "api_healthcheck_failed",
+                            "details": error_messages
+                        }))
+                        continue  # Don't start session
+                    
+                    print("[Healthcheck] ✅ Todos los servicios están disponibles")
+                    # ========== END HEALTHCHECK ==========
+                    
                     # Use pre-loaded STT from startup (or load now if not done)
                     if ASR is None and settings.stt_model and settings.stt_model.lower() not in ["none", "disabled", ""]:
                         try:
@@ -235,8 +326,15 @@ async def ws_endpoint(ws: WebSocket):
                                 sess.tts_model = TTS
                                 print(f"[TTS] ✅ Model loaded: {settings.tts_model}")
                             except Exception as e:
-                                print(f"[TTS] ❌ Failed to initialize '{settings.tts_model}': {e}")
+                                error_msg = f"Error al inicializar TTS {settings.tts_model}: {str(e)}"
+                                print(f"[TTS] ❌ {error_msg}")
+                                await ws.send_text(jdumps({
+                                    "type": "error",
+                                    "message": error_msg,
+                                    "error_type": "tts_initialization_failed"
+                                }))
                                 TTS = None
+                                sess.tts_model = None
                     
                     if ASR:
                         print(f"[Session] Using STT: {type(ASR).__name__ if hasattr(ASR, '__name__') else type(ASR).__class__.__name__}")
@@ -261,8 +359,8 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         print("[Session] ⚠️ STT workers skipped - STT not initialized")
 
-                    # Start TTS workers ONLY if TTS is enabled
-                    if TTS is not None and sess.tts_task is None:
+                    # Start TTS workers ONLY if TTS is enabled AND successfully loaded
+                    if sess.tts_model is not None and sess.tts_task is None:
                         try:
                             # Use chatter_streamer for chatterbox model, tts_streamer for others
                             if settings.tts_model == "chatterbox":
@@ -280,30 +378,36 @@ async def ws_endpoint(ws: WebSocket):
                             print("[Session] TTS and conversation workers started, sending greeting...")
                         except Exception as e:
                             dprint("TTS connection error ", e)
-                    elif TTS is None:
-                        print("[Session] TTS workers skipped - TTS not initialized")
-                        # Still send started event even without TTS
-                        await ws.send_text(jdumps({"type": "scriptsession.started"}))
+                    elif sess.tts_model is None:
+                        print("[Session] ⚠️ TTS workers skipped - TTS initialization failed")
+                        print("[Session] ⛔ Session cannot continue without TTS")
+                        # Don't send started event if TTS failed - session is not usable
+                        await ws.send_text(jdumps({
+                            "type": "error",
+                            "message": "No se pudo inicializar TTS. La sesión no puede continuar.",
+                            "error_type": "session_start_failed"
+                        }))
+                        continue
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
 
                     # Send greeting ONLY if TTS is available
-                    if TTS is not None:
+                    if sess.tts_model is not None:
                         await answer_greeting(sess)
                         print("[Session] Greeting sent to TTS queue")
                     else:
-                        print("[Session] Greeting skipped - TTS not available")
+                        print("[Session] ⛔ Greeting skipped - TTS not available")
 
                 elif t == "input_audio_buffer.append":
-                    print(f"[AUDIO] Received audio buffer message")
+                    # print(f"[AUDIO] Received audio buffer message")
                     try:
                         aud = data.get("audio")
-                        print(f"[AUDIO] Audio data length: {len(aud) if aud else 0}")
+                        # print(f"[AUDIO] Audio data length: {len(aud) if aud else 0}")
                         if aud:
                             audio = process_data_to_audio(
                                 aud, input_sample_rate=INPUT_SAMPLE_RATE, whisper_sr=WHISPER_SR
                             )
-                            print(f"[AUDIO] Processed audio shape: {audio.shape if audio is not None else 'None'}")
+                            # print(f"[AUDIO] Processed audio shape: {audio.shape if audio is not None else 'None'}")
                             if audio is None:
                                 dprint("[NO AUDIO]")
                                 continue

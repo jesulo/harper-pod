@@ -6,11 +6,14 @@ from utils.constants import COMPANION_NAME, LANGUAGE_CODE_REVERSED, OPENAI_KEY
 import re
 import json
 from llm.utils import ALLOWED_CLASSES, extract_companion_followup
+from config import settings
 
-if OPENAI_KEY == "":
-    OPENAI_KEY = os.environ.get("OPENAI_KEY")
+# Use OPENAI_KEY from constants or settings
+api_key = OPENAI_KEY or settings.openai_api_key
+if not api_key:
+    api_key = os.environ.get("OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_KEY)
+client = OpenAI(api_key=api_key)
 
 def chat_reply(prev_scripts:str, prev_answers:str, input_sentence:str, language:str = "English", onToken:Callable[[str], None] = None, prompt:str = '', name:str = 'hojin', current_time:str = ''):
     conv = f"""

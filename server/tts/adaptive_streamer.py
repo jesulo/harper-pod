@@ -61,16 +61,19 @@ class OpusEncoder:
 
 async def adaptive_tts_streamer(sess: Session):
     """
-    Adaptive TTS streamer that uses factory pattern if available, 
-    falls back to original chatter_streamer
+    Adaptive TTS streamer that uses factory pattern if available.
+    NO FALLBACK to chatterbox when remote TTS fails.
     """
     if hasattr(sess, 'tts_model') and sess.tts_model is not None:
         # Use factory pattern TTS
         await factory_tts_streamer(sess)
     else:
-        # Fall back to original chatterbox implementation
-        from tts.chatter_infer import chatter_streamer as original_chatter_streamer
-        await original_chatter_streamer(sess)
+        # NO FALLBACK: If TTS model is not available, don't use local Chatterbox
+        print("[TTS] ⚠️ TTS model not available, NO fallback to local Chatterbox")
+        print("[TTS] Streamer will not process any TTS requests")
+        # Keep the task alive but idle
+        while sess.running:
+            await asyncio.sleep(1)
 
 
 async def factory_tts_streamer(sess: Session):
@@ -245,6 +248,19 @@ async def factory_tts_streamer(sess: Session):
                 import traceback
                 print(f"[TTS Factory] ❌ Error processing TTS: {e}")
                 traceback.print_exc()
+                
+                # Notify frontend about TTS error
+                try:
+                    error_msg = f"Error en TTS: {str(e)[:100]}"
+                    sess.out_q.put_nowait(jdumps({
+                        "type": "error",
+                        "message": error_msg,
+                        "error_type": "tts_streaming_failed"
+                    }))
+                    print(f"[TTS Factory] 📤 Sent error notification to frontend")
+                except Exception as notify_err:
+                    print(f"[TTS Factory] ⚠️ Failed to notify frontend: {notify_err}")
+                
                 # Mark task as done even on error
                 try:
                     sess.tts_in_q.task_done()

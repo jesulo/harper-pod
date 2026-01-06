@@ -276,6 +276,42 @@ export default function Jennifer() {
         }
       } else if (msgType === "session.close") {
         setConnected(false);
+      } else if (msgType === "error") {
+        // Handle error messages from backend
+        console.error("[FRONTEND] ❌ Error received from backend:", msg.message);
+        const errorMessage = msg.message || "Error desconocido del servidor";
+        
+        // Handle API healthcheck failures before session starts
+        if (msg.error_type === "api_healthcheck_failed") {
+          console.error("[FRONTEND] API healthcheck failed, cannot start session");
+          setIsSessionLoading(false);
+          setConnected(false);
+          stopMic();
+          
+          // Show generic error without technical details for end users
+          alert(`❌ El servicio no está disponible en este momento.\n\nPor favor, intenta nuevamente más tarde.`);
+          return;
+        }
+        
+        // Show error to user (for non-healthcheck errors)
+        setResponses((ts) => [
+          ...ts,
+          {
+            type: "system",
+            text: `⚠️ ERROR: ${errorMessage}`,
+          },
+        ]);
+        
+        // Stop microphone and close connection on critical errors
+        if (msg.error_type === "tts_initialization_failed" || 
+            msg.error_type === "tts_streaming_failed" ||
+            msg.error_type === "session_start_failed") {
+          console.error("[FRONTEND] Critical error, stopping session");
+          stopMic();
+          setRecording(false);
+          setIsSessionLoading(false);
+          alert(`El servicio ha encontrado un problema.\n\nLa sesión se ha detenido.`);
+        }
       } else if (msgType === "interrupt_output") {
         setResponses((ts) => [
           ...ts.slice(0, -1),

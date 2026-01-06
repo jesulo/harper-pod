@@ -50,3 +50,9 @@ next-env.d.ts
 server/harper_env/
 *.pyc
 __pycache__/
+client/node_modules/
+server/harper_env/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/.next/
