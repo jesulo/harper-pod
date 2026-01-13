@@ -1,161 +1,275 @@
-# Harper
+# Harper Pod
 
-**Harper** is a conversational AI process inspired by [Sesame](https://sesame.com).  
-It implements a full voice-based conversation loop with speech recognition, text generation, and speech synthesis, all running locally or via APIs.
-Shout out to Chris Hong! 😊
+**Harper Pod** is a REST API for Speech-to-Text (STT) and Text-to-Speech (TTS) with voice cloning capabilities. It provides OpenAI-compatible endpoints powered by Whisper and Chatterbox models.
 
-Please watch [demo video 🎬](https://www.loom.com/share/3ef0ffd2844a4f148e087a7e6bd69b9b)!
+## Features
 
-<br />
+- 🎤 **Whisper STT**: Fast transcription using `faster-whisper` (large-v3)
+- 🔊 **Chatterbox TTS**: Multilingual text-to-speech with voice cloning
+- 🎭 **Voice Management**: Upload, list, and delete custom voices
+- 🌍 **Multi-language Support**: 23+ languages (ar, da, de, el, en, es, fi, fr, he, hi, it, ja, ko, ms, nl, no, pl, pt, ru, sv, sw, tr, zh)
+- 📦 **Docker Ready**: Production-ready images with models baked in
+- 🚀 **Streaming Audio**: Real-time WAV streaming for TTS
 
-**Features Implemented**
-<br />
-1. When the user is silent, the system occasionally generates **short self-talk**.  
-2. The LLM is **forced to begin with a preset “first word”**, whose audio is pre-generated to reduce TTFT.  
-3. It inserts **short silences mid-sentence** for more natural pacing.  
-4. **Interruptions** mid-speech are handled; only spoken content is stored in the conversation history.  
-5. Using multilingual Chatterbox, it can **speak in any language and any cloned voice** (English works best).  
-6. Audio is **encoded/decoded with Opus**.  
-7. Smart **turn detection** using <code>silero-vad</code> and <code>pipecat/smart-turn-v3</code>.
+## API Endpoints
 
-<br />
+### Health Check
+\`\`\`bash
+GET /health
+\`\`\`
 
-**Notes**
+### Speech-to-Text (STT)
+\`\`\`bash
+POST /v1/audio/transcriptions
+Content-Type: multipart/form-data
 
-- For **fully local serving**, you can run <code>gpt-oss-20b</code>.  
-- For **better quality and latency**, <code>gpt-4.1-mini</code> via API is recommended.  
-- Running for 30 minutes of continuous conversation with <code>gpt-4.1-mini</code> costs **less than $0.10**.  
-- Other local LLMs may work, but no further experiments were done for optimization.
-- On the first run, it will take some time to download the model weights.
+Parameters:
+- file: Audio file (mp3, mp4, mpeg, mpga, m4a, wav, webm)
+- model: whisper-1 (default)
+- language: Language code (optional)
+- response_format: json (default), text, srt, verbose_json, vtt
+\`\`\`
 
-<br />
+### Text-to-Speech (TTS)
+\`\`\`bash
+POST /v1/audio/speech
+Content-Type: application/json
 
-**For voice cloning**
+{
+  "input": "Text to synthesize",
+  "voice": "default",
+  "language": "en",
+  "response_format": "mp3"
+}
+\`\`\`
 
-Currently, to reduce TTFT (Time to First Token), the system pre-generates audio for several dozen common “starting words.”
-During conversation, the LLM is always prompted to begin with one of these words, and the corresponding pre-generated audio is played immediately to minimize initial delay.
+### TTS Streaming
+\`\`\`bash
+POST /v1/audio/speech/stream
+Content-Type: application/json
 
-If you want to change the voice, update the new voice audio file path in ```utils/constants.py``` and then run ```voiceprepare.py```.
-This will regenerate the pre-generated audio clips using the new voice.
+{
+  "input": "Text to synthesize",
+  "voice": "default",
+  "language": "en"
+}
+\`\`\`
 
+### Voice Management
 
-## Modules Used
-thanks to the following projects 🔥
+#### Upload Voice
+\`\`\`bash
+POST /v1/voices
+Content-Type: multipart/form-data
 
-- **STT**: [whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) or [Groq Whisper API](https://groq.com)
-- **LLM**: <code>gpt-4.1-mini</code> (API) or <code>gpt-oss-20b</code> (via [Ollama](https://ollama.ai))  
-- **TTS**: [chatterbox](https://github.com/resemble-ai/chatterbox) or [Together AI](https://together.ai)
-- **Turn Detection**: [silero-vad](https://github.com/snakers4/silero-vad) + [pipecat/smart-turn-v3](https://github.com/pipecat-ai/smart-turn)
+Parameters:
+- file: Audio file (wav, mp3, flac, m4a, ogg)
+- name: Unique voice name
+\`\`\`
 
-**Available Backends:**
-- **STT Options**: `whisper-local` (default), `groq`
-- **TTS Options**: `chatterbox` (local, default), `together`
+#### List Voices
+\`\`\`bash
+GET /v1/voices
+\`\`\`
 
-<br />
+#### Delete Voice
+\`\`\`bash
+DELETE /v1/voices/{name}
+\`\`\`
 
-## Server Requirements
+## Quick Start
 
-- CUDA-compatible GPU  
-- Tested with **CUDA 12.4** and **12.6** (other versions may also work)  
-- **Python 3.10** recommended (newer versions may work fine)  
-- <code>ffmpeg</code> required for some audio operations  
+### Using Docker (Recommended)
 
-<br />
+\`\`\`bash
+# Clone repository
+git clone https://github.com/jesulo/harper-pod.git
+cd harper-pod
 
-### Server Setup
+# Build and run with Docker Compose
+docker compose -f docker-compose.prod.yml up -d
 
-```bash
-git clone https://github.com/thxxx/harper.git  
-cd server  
-python3.10 -m venv .venv  
-source .venv/bin/activate  
-bash setup.sh
-```
+# Wait for models to load (~2-3 minutes)
+# Check health
+curl http://localhost:8007/health
+\`\`\`
 
-### Client Setup
+### Manual Installation
 
-```bash
-git clone https://github.com/thxxx/harper.git  
-cd client  
-npm install  
-npm run dev  
-```
+#### Requirements
+- CUDA-compatible GPU (24GB+ VRAM recommended)
+- Python 3.10+
+- CUDA 12.1+
+- ffmpeg
 
+#### Setup
+\`\`\`bash
+# Create virtual environment
+python3.10 -m venv venv
+source venv/bin/activate
 
-## 🏃 Quickstart
+# Install dependencies
+cd server
+pip install -r requirements.txt
 
-**Run the client**
+# Run server
+python api_server.py
+\`\`\`
 
-```bash
-npm run dev  
-```
+## Usage Examples
 
-<br />
+### Transcribe Audio
+\`\`\`bash
+curl -X POST http://localhost:8007/v1/audio/transcriptions \\
+  -F "file=@audio.mp3" \\
+  -F "language=en"
+\`\`\`
 
-**Run the server**
+### Generate Speech
+\`\`\`bash
+curl -X POST http://localhost:8007/v1/audio/speech/stream \\
+  -H "Content-Type: application/json" \\
+  -d '{"input": "Hello, world!", "language": "en"}' \\
+  -o output.wav
+\`\`\`
 
-**Configuration Manager (New!)**
+### Upload Custom Voice
+\`\`\`bash
+curl -X POST http://localhost:8007/v1/voices \\
+  -F "file=@my_voice.wav" \\
+  -F "name=myvoice"
+\`\`\`
 
-You can now easily switch between different STT and TTS backends by editing `.env`:
+### Generate with Custom Voice
+\`\`\`bash
+curl -X POST http://localhost:8007/v1/audio/speech/stream \\
+  -H "Content-Type: application/json" \\
+  -d '{"input": "Hello with my voice!", "voice": "myvoice", "language": "en"}' \\
+  -o output_custom.wav
+\`\`\`
 
-```bash
-# Create configuration file
-cp .env.example .env
+## Configuration
 
-# Edit .env to configure backends:
-STT_MODEL=groq          # Options: whisper-local, groq  
-TTS_MODEL=together      # Options: chatterbox, together
+### Environment Variables
 
-# Add your API keys:
-STT__GROQ_API_KEY=your_groq_key
-TTS__TOGETHER_API_KEY=your_together_key
+\`\`\`bash
+# Server port (default: 8007)
+PORT=8007
 
-# Run Harper
-python companionserver.py
-```
+# Whisper model (default: large-v3)
+WHISPER_MODEL=large-v3
 
-**Manual Configuration**
+# Chatterbox model path
+CHATTERBOX_MODEL_PATH=./chatterbox_infer/models
+\`\`\`
 
-**1. For Local LLM**
+## Docker Images
 
-1. In <code>server/utils/constants.py</code>, set  
-   <code>LLM_MODEL = "local"</code>  
-2. Then start Ollama:
+### Build Production Image
+\`\`\`bash
+docker build -f Dockerfile.full -t speech-pod:latest .
+\`\`\`
 
-```bash
-ollama server  
-ollama run gpt-oss:20b
-uvicorn companionserver:app --host 0.0.0.0 --port 5000  
-```
+This creates a production-ready image (~16GB) with:
+- PyTorch 2.5.1 + CUDA 12.1
+- Whisper large-v3 model
+- Chatterbox multilingual TTS model
 
-<br />
+### Push to Docker Hub
+\`\`\`bash
+docker tag speech-pod:latest your-username/speech-pod:latest
+docker push your-username/speech-pod:latest
+\`\`\`
 
-**2. For GPT API**
+## Architecture
 
-Set your API key in <code>server/utils/constants.py</code>  
-   or export it as an environment variable:  
-   ```export OPENAI_KEY="sk-xxxxxx"```
+\`\`\`
+harper-pod/
+├── server/
+│   ├── api_server.py          # Main FastAPI application
+│   ├── audio_samples/         # Default voice samples
+│   ├── voices/                # User-uploaded voices
+│   ├── chatterbox_infer/      # Chatterbox TTS engine
+│   ├── stt/                   # Whisper STT implementations
+│   ├── tts/                   # TTS factory and utilities
+│   └── utils/                 # Helper functions
+├── Dockerfile.api             # Development Dockerfile
+├── Dockerfile.full            # Production Dockerfile (with models)
+└── docker-compose.prod.yml    # Production Docker Compose
+\`\`\`
 
-```bash
-python companionserver.py
-# OR: uvicorn companionserver:app --host 0.0.0.0 --port 5000
-```
+## Models
 
-<br />
+### Whisper (STT)
+- **Model**: \`large-v3\` via \`faster-whisper\`
+- **Languages**: 99+ languages
+- **Speed**: ~0.05x Real-Time Factor on GPU
+- **Download**: Automatic on first run
+
+### Chatterbox (TTS)
+- **Model**: \`ResembleAI/chatterbox\` (multilingual)
+- **Languages**: 23 languages
+- **Voice Cloning**: Supports custom voice upload
+- **Download**: Automatic on first run (~3.2GB)
+
+## Performance
+
+### Benchmarks (RTX 3090)
+- **STT**: ~1.2s for 27s audio (RTF 0.046x)
+- **TTS**: ~5s for 20-word sentence
+- **Streaming TTS**: First chunk in <500ms
+
+### Resource Usage
+- **GPU Memory**: ~10GB (Whisper + Chatterbox loaded)
+- **Disk Space**: ~20GB (models + dependencies)
+
+## API Documentation
+
+Interactive API docs available at:
+- **Swagger UI**: http://localhost:8007/docs
+- **ReDoc**: http://localhost:8007/redoc
+
+## Supported Audio Formats
+
+### Input (STT)
+- mp3, mp4, mpeg, mpga, m4a, wav, webm
+
+### Output (TTS)
+- wav (default for streaming)
+- mp3, opus (for non-streaming)
+
+### Voice Upload
+- wav, mp3, flac, m4a, ogg
+
+## Troubleshooting
+
+### Out of Memory Error
+- Reduce \`max_cap\` in \`server/chatterbox_infer/mtl_tts.py\`
+- Use a smaller Whisper model: \`medium\` or \`small\`
+
+### Slow Generation
+- Check GPU is being used: \`nvidia-smi\`
+- Ensure CUDA drivers are up to date
+
+### Model Download Fails
+- Check internet connection
+- Manually download models from Hugging Face
+
+## Credits
+
+Built on top of:
+- [faster-whisper](https://github.com/guillaumekln/faster-whisper)
+- [Chatterbox by ResembleAI](https://huggingface.co/ResembleAI/chatterbox)
+- [PyTorch](https://pytorch.org/)
+
+## License
+
+MIT License
+
+## Contact
+
+Questions or feedback? Open an issue on GitHub.
 
 ---
 
-## 🚧 Not Yet Implemented
-
-1. Context management / long-term memory  
-2. Lower TTFT & best-performing local LLM setup
-3. CPU support
-
----
-
-## ⭐️ Ending
-
-Questions or feedback?  
-Feel free to reach out: khj605123@gmail.com
-<br />
-Best regards, From Korea
+**Harper Pod** - REST API for STT + TTS with Voice Cloning
