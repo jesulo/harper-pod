@@ -30,11 +30,9 @@ WORKDIR /app
 
 # Copy only necessary directories
 COPY server/chatterbox_infer ./chatterbox_infer
-COPY server/stt ./stt
-COPY server/tts ./tts
-COPY server/utils ./utils
 COPY server/audio_samples ./audio_samples
 COPY server/api_server.py .
+RUN mkdir -p voices
 
 # Create a minimal requirements file
 RUN echo "fastapi==0.109.0" > requirements.txt && \
