@@ -1,0 +1,74 @@
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    python3.10 \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    libopus0 \
+    libopus-dev \
+    build-essential \
+    git \
+    wget \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symbolic links for python
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+# Copy only necessary directories
+COPY server/chatterbox_infer ./chatterbox_infer
+COPY server/stt ./stt
+COPY server/tts ./tts
+COPY server/utils ./utils
+COPY server/audio_samples ./audio_samples
+COPY server/api_server.py .
+
+# Create a minimal requirements file
+RUN echo "fastapi==0.109.0" > requirements.txt && \
+    echo "uvicorn[standard]==0.27.0" >> requirements.txt && \
+    echo "python-multipart==0.0.6" >> requirements.txt && \
+    echo "pydantic==2.5.3" >> requirements.txt && \
+    echo "numpy==1.26.3" >> requirements.txt && \
+    echo "faster-whisper==1.1.0" >> requirements.txt && \
+    echo "openai-whisper" >> requirements.txt && \
+    echo "transformers==4.47.1" >> requirements.txt && \
+    echo "diffusers" >> requirements.txt && \
+    echo "datasets==3.2.0" >> requirements.txt && \
+    echo "accelerate==1.2.1" >> requirements.txt && \
+    echo "librosa==0.10.1" >> requirements.txt && \
+    echo "soundfile==0.12.1" >> requirements.txt && \
+    echo "einops==0.8.0" >> requirements.txt && \
+    echo "resemble-perth" >> requirements.txt && \
+    echo "conformer==0.3.2" >> requirements.txt && \
+    echo "s3tokenizer" >> requirements.txt
+
+# Install PyTorch with CUDA support first (using latest available version for CUDA 12.1)
+RUN pip install --no-cache-dir \
+    torch==2.5.1+cu121 \
+    torchaudio==2.5.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Install other requirements
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Expose port
+EXPOSE 8007
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+    CMD python -c "import requests; requests.get('http://localhost:8007/health')"
+
+# Run the API server
+CMD ["python", "api_server.py"]

@@ -1,0 +1,33 @@
+services:
+  harper-pod-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.full
+    image: ${DOCKER_REGISTRY:-}speech-pod:latest
+    container_name: harper-pod-api
+    ports:
+      - "8007:8007"
+    environment:
+      - WHISPER_MODEL=large-v3
+      - PORT=8007
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    # NO volumes - models are baked into the image
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8007/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  default:
+    name: harper-pod-network

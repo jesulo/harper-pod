@@ -1,0 +1,45 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.Python
+**/env
+**/venv
+**/ENV
+**/harper_env
+**/.env
+**/.venv
+**/pip-log.txt
+**/pip-delete-this-directory.txt
+**/.pytest_cache
+**/.coverage
+**/*.log
+
+# Node
+**/node_modules
+**/.next
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (too large for Docker build)
+**/*.onnx
+**/*.pt
+**/*.pth
+# Note: models/ directory contains Python code, not model weights

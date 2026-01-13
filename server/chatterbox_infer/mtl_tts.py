@@ -409,7 +409,7 @@ class ChatterboxMultilingualTTS:
 
         alpha = 4.0          
         min_new_tokens = 100 
-        max_cap = 600        
+        max_cap = 800        
 
         max_new_tokens = min(max_cap, max(min_new_tokens, int(alpha * text_len)))
 
